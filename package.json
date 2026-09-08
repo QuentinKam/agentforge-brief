@@ -13,7 +13,8 @@
     "db:generate": "drizzle-kit generate",
     "db:migrate": "drizzle-kit migrate",
     "db:push": "drizzle-kit push",
-    "seed": "bun server/src/db/seed.ts"
+    "seed": "bun server/src/db/seed.ts",
+    "bench:rag": "bun server/src/rag/bench.ts"
   },
   "dependencies": {
     "@hono/zod-validator": "^0.4.3",

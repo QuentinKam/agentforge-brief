@@ -9,6 +9,7 @@ import { agentProjectRoutes } from './routes/agent-projects';
 import { agentRunRoutes } from './routes/agent-runs';
 import { harnessRoutes } from './routes/harness';
 import { skillRoutes } from './routes/skills';
+import { ragRoutes } from './routes/rag';
 import { ApiError, sendApiError } from './lib/errors';
 import type { AppEnv } from './types';
 
@@ -35,6 +36,7 @@ app.route('/api/auth', authRoutes);
 app.route('/api/agent-projects', agentProjectRoutes);
 app.route('/api/agent-projects', harnessRoutes);
 app.route('/api/agent-projects', skillRoutes);
+app.route('/api/agent-projects', ragRoutes);
 app.route('/api/agent-runs', agentRunRoutes);
 
 // 404 兜底

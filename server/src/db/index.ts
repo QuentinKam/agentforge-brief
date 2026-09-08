@@ -16,10 +16,36 @@ declare global {
 }
 
 const client =
-  globalThis.__agentforgeDbClient ?? (globalThis.__agentforgeDbClient = postgres(databaseUrl, { max: 10 }));
+  globalThis.__agentforgeDbClient ??
+  (globalThis.__agentforgeDbClient = postgres(databaseUrl, {
+    max: 50,
+    // 测试场景下大批量插入用，避免连接池耗尽
+    idle_timeout: 20,
+    connect_timeout: 10,
+  }));
 
 export const db =
   globalThis.__agentforgeDb ??
   (globalThis.__agentforgeDb = drizzle(client, { schema, casing: 'snake_case' }));
 
 export { schema };
+// 重新导出 schema 类型供路由层与服务层使用
+export type {
+  User,
+  NewUser,
+  AgentProject,
+  NewAgentProject,
+  AgentRun,
+  NewAgentRun,
+  AgentRunStep,
+  NewAgentRunStep,
+  HarnessConfig,
+  NewHarnessConfig,
+  Skill,
+  NewSkill,
+  RagDocument,
+  NewRagDocument,
+  RagChunk,
+  NewRagChunk,
+} from './schema';
+export type { RagChunkMetadata } from './schema';

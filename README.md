@@ -8,7 +8,8 @@
 
 **M1 — 基础架构 + Agent 执行闭环**：已完成。
 **M2 — Skill 系统 + Harness Builder**：已完成。
-M3-M5 见 [PRD.md](PRD.md) 第 5 节路线图。
+**M3 — Agent Runtime 沙箱 + RAG 知识库**：已完成。
+M4-M5 见 [PRD.md](PRD.md) 第 5 节路线图。
 
 ## M1 已实现功能
 
@@ -29,6 +30,37 @@ M3-M5 见 [PRD.md](PRD.md) 第 5 节路线图。
 - [x] Harness 配置导入 / 导出（JSON）
 - [x] Zod 校验错误统一为 ApiError 响应结构（zodHook）
 - [x] 4 个内置工具实现：code_search（rg）/ file_io（带路径越界防护）/ shell_exec（spawn + 超时）/ http_request
+
+## M3 已实现功能
+
+- [x] Bun.spawn 沙箱：环境变量白名单（仅 PATH/HOME/LANG 等）+ 超时控制 + stdout/stderr 采集
+- [x] 沙箱安全测试（16 用例 TDD）：环境变量隔离、工作目录隔离、超时控制、路径越界防护
+- [x] shell_exec / code_search 工具迁移到 Bun.spawn 沙箱执行
+- [x] RAG 知识库 schema：rag_documents + rag_chunks（pgvector vector(1536)），含 content_hash 去重
+- [x] 文档分块器：Markdown 按标题、TypeScript/JS 按函数定义、纯文本按 chunkSize + overlap
+- [x] Embedding Provider 抽象层：OpenAI text-embedding-3-small 主 + 本地 hash 伪向量降级（无 key 时启用，仅供测试）
+- [x] RAG 服务：uploadDocument（分块 + 批量 embedding + 入库）/ retrieve / listDocuments / deleteDocument
+- [x] RAG 路由：POST /rag/documents 上传、GET 列表、DELETE 删除、POST /rag/search 检索
+- [x] RAG 检索：pgvector cosine 相似度 + 4 种 metadata 过滤（fileType/heading/filePath/documentId）+ top-k
+- [x] Agent 运行时 RAG 注入：POST /api/agent-runs 自动用 input 检索 → 注入 system 消息 → 落 rag_retrieval step trace
+- [x] ragOptions 配置：enabled（开/关注入）/ topK（1-20）
+- [x] 检索延迟压测：330 chunks 数据集 P95 = 6.86ms（远低于 PRD §M3 验收线 200ms）
+
+### M3 RAG 检索性能基准
+
+数据集：30 个 Markdown 文档，共 330 个 chunk；pgvector 顺序扫描（无 HNSW 索引）。
+
+| 指标 | 数值 |
+|------|------|
+| 平均 | 4.92 ms |
+| P50 | 4.65 ms |
+| P95 | 6.86 ms |
+| P99 | 8.83 ms |
+| 最大 | 22.69 ms |
+
+PRD §M3 验收线：P95 < 200ms → **PASS**。
+
+运行压测：`bun run bench:rag`
 
 ## 技术栈
 
@@ -52,22 +84,37 @@ agentforge-brief/
 │   └── src/
 │       ├── index.ts         # 应用入口：注册路由 + 全局错误处理
 │       ├── db/
-│       │   ├── schema.ts   # Drizzle schema：4 表 + 2 enum
+│       │   ├── schema.ts   # Drizzle schema：6 表 + 2 enum（含 pgvector rag_chunks）
 │       │   └── index.ts     # 单例 db 客户端
 │       ├── llm/             # AI Provider 抽象层
 │       │   ├── provider.ts  # LLMProvider 接口 + 工厂
 │       │   ├── openai.ts    # OpenAI 兼容实现
 │       │   ├── anthropic.ts # Anthropic Claude 实现
+│       │   ├── embedding.ts # Embedding Provider（OpenAI 主 + 本地降级）
 │       │   └── index.ts     # 工厂单例
 │       ├── lib/
 │       │   ├── jwt.ts       # signToken / verifyToken / extractBearer
-│       │   └── errors.ts    # ApiError + sendApiError（统一错误响应）
+│       │   ├── errors.ts    # ApiError + sendApiError（统一错误响应）
+│       │   ├── tokens.ts    # token 估算 + 上下文预览
+│       │   └── zod-hook.ts  # Zod 校验错误统一为 ApiError
 │       ├── middleware/
 │       │   └── auth.ts      # JWT 鉴权中间件
 │       ├── routes/
 │       │   ├── auth.ts            # POST /api/auth/register|login
 │       │   ├── agent-projects.ts # GET/POST/PATCH/DELETE /api/agent-projects
-│       │   └── agent-runs.ts     # POST/GET /api/agent-runs（含 trace）
+│       │   ├── agent-runs.ts     # POST/GET /api/agent-runs（含 RAG 注入 + step trace）
+│       │   ├── harness.ts        # GET/PUT /api/agent-projects/:id/harness（+导入导出+预览）
+│       │   ├── skills.ts         # CRUD /api/agent-projects/:id/skills（+模板种子）
+│       │   └── rag.ts            # /api/agent-projects/:id/rag/{documents,search}
+│       ├── rag/             # RAG 知识库
+│       │   ├── chunker.ts   # 文档分块器（Markdown / Code / Text）
+│       │   ├── service.ts   # uploadDocument / retrieve / listDocuments / deleteDocument
+│       │   └── bench.ts    # 检索延迟压测脚本
+│       ├── sandbox/         # Bun.spawn 子进程沙箱
+│       │   └── index.ts    # runInSandbox / runCodeInSandbox / isPathSafe
+│       ├── skills/          # Skill 系统
+│       │   ├── engine.ts   # matchSkills / executeSkill
+│       │   └── registry.ts  # 4 个内置工具 + 注册表
 │       └── types.ts        # Hono ctx.state 类型扩展
 ├── client/                  # Vite + React 前端
 │   └── src/
@@ -147,16 +194,22 @@ bun run dev:client
 
 ```bash
 bun run typecheck        # tsc --noEmit，全绿
-bun test                 # Bun 内置 test runner，30 个用例全绿
+bun test                 # Bun 内置 test runner，83 个用例全绿
 bun run build            # 前端生产构建
+bun run bench:rag        # RAG 检索延迟压测（P95 < 200ms）
 ```
 
 测试覆盖：
 
-- `tests/auth.test.ts`（13 用例）：JWT 签发/校验、ApiError 工厂、注册/登录/重复注册/密码错误/无 token/无效 token
+- `tests/auth.test.ts`（17 用例）：JWT 签发/校验、ApiError 工厂、注册/登录/重复注册/密码错误/无 token/无效 token
 - `tests/provider.test.ts`（7 用例）：ProviderFactory 注册/查找、MissingApiKeyError 层次、MockProvider chat 契约
 - `tests/skills.test.ts`（7 用例）：Skill 关键词匹配 + 工具调用链（顺序、不存在、失败中断）
 - `tests/tokens.test.ts`（7 用例）：token 估算（中英独立）+ 上下文预览构建
+- `tests/sandbox.test.ts`（16 用例）：环境变量隔离、工作目录隔离、超时控制、stdout/stderr 采集、isPathSafe 路径越界
+- `tests/chunker.test.ts`（7 用例）：Markdown 按标题、TypeScript 按函数、纯文本兜底、JSON 切分
+- `tests/embedding.test.ts`（9 用例）：LocalHash 维度/归一化/批量、OpenAI 无 key 抛错、工厂降级逻辑
+- `tests/rag.test.ts`（14 用例）：文档上传 + hash 去重 + 检索 top-k + metadata 过滤 + 路由集成
+- `tests/agent-runs-rag.test.ts`（5 用例）：Agent 运行时 RAG 注入 + step trace + ragOptions 配置
 
 ## 一键启动
 
@@ -175,22 +228,8 @@ bash start.command
 
 - [ADR-001](docs/adr/001-scaffold-vite-vs-bun-template.md)：Vite 8 / TS 6 字面偏离 AGENTS.md 的 Vite 7 / TS 5
 - [ADR-002](docs/adr/002-postgresql-version.md)：PostgreSQL 17 字面偏离 AGENTS.md 的 16
+- [ADR-003](docs/adr/003-embedding-fallback.md)：Embedding 本地降级选用 hash 伪向量（不引入 bge-small）
 
 ## 路线图
 
-M2-M5 见 [PRD.md](PRD.md) 第 5 节。每个里程碑一个 git branch，完成后合回 main 并打 tag。
-```
-
-测试覆盖：
-
-- `tests/auth.test.ts`：JWT 签发/校验、ApiError 工厂、注册/登录/重复注册/密码错误/无 token/无效 token（共 17 用例）
-- `tests/provider.test.ts`：ProviderFactory 注册/查找、MissingApiKeyError 层次、MockProvider chat 契约（共 7 用例，17 总数含此 7）
-
-## 架构决策记录（ADR）
-
-- [ADR-001](docs/adr/001-scaffold-vite-vs-bun-template.md)：Vite 8 / TS 6 字面偏离 AGENTS.md 的 Vite 7 / TS 5
-- [ADR-002](docs/adr/002-postgresql-version.md)：PostgreSQL 17 字面偏离 AGENTS.md 的 16
-
-## 路线图
-
-M2-M5 见 [PRD.md](PRD.md) 第 5 节。每个里程碑一个 git branch，完成后合回 main 并打 tag。
+M4-M5 见 [PRD.md](PRD.md) 第 5 节。每个里程碑一个 git branch，完成后合回 main 并打 tag。

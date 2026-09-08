@@ -1,9 +1,9 @@
 // Skill 工具注册表 — Skill 执行引擎按 tool 名查找执行器
 // M2 内置 4 个工具：code_search / file_io / shell_exec / http_request
-// 这些是 M3 真正沙箱的前身；M2 先跑通链路，M3 替换为 Bun.spawn 隔离版
+// M3：shell_exec 改用 Bun.spawn 沙箱（环境隔离 + 超时 + stdout/stderr 采集）
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
-import { spawn } from 'node:child_process';
+import { runInSandbox, isPathSafe } from '../sandbox';
 
 export interface ToolContext {
   // 工作目录：默认项目根，但 file_io/shell 会限制只能在此目录及子目录
@@ -37,26 +37,25 @@ export function listTools(): string[] {
 
 // ===== 内置工具实现 =====
 
-// 1. code_search —— 递归 grep
+// 1. code_search —— 递归 grep，在沙箱中执行 rg
 const codeSearch: ToolHandler = async (input, ctx) => {
   const opts = input as { pattern: string; cwd?: string; fileGlob?: string };
   if (!opts.pattern) return { ok: false, data: null, error: 'pattern 必填' };
   const cwd = opts.cwd && isPathSafe(opts.cwd, ctx.cwd) ? opts.cwd : ctx.cwd;
   try {
-    const result = await runShell('rg', ['-n', '--', opts.pattern, cwd], ctx.cwd);
+    const result = await runInSandbox('rg', ['-n', '--', opts.pattern, cwd], { cwd: ctx.cwd, timeoutMs: 5000 });
     const lines = result.stdout.split('\n').filter(Boolean).slice(0, 50);
     const matches = lines.map((l) => {
-      // rg 输出格式 file:line:content
       const m = l.match(/^(.+?):(\d+):(.*)$/);
       return m ? { file: m[1], line: Number(m[2]), content: m[3] } : { file: l, line: 0, content: '' };
     });
-    return { ok: true, data: { matches } };
+    return { ok: result.exitCode === 0, data: { matches, exitCode: result.exitCode } };
   } catch (e) {
     return { ok: false, data: null, error: (e as Error).message };
   }
 };
 
-// 2. file_io —— 读/写/追加
+// 2. file_io —— 读/写/追加，路径越界防护
 const fileIo: ToolHandler = async (input, ctx) => {
   const opts = input as { op: 'read' | 'write' | 'append'; path: string; content?: string };
   if (!opts.path) return { ok: false, data: null, error: 'path 必填' };
@@ -83,19 +82,24 @@ const fileIo: ToolHandler = async (input, ctx) => {
   }
 };
 
-// 3. shell_exec —— 在 cwd 下执行 shell，超时控制
+// 3. shell_exec —— 用 Bun.spawn 沙箱执行 shell 命令
 const shellExec: ToolHandler = async (input, ctx) => {
   const opts = input as { command: string; cwd?: string; timeoutMs?: number };
   if (!opts.command) return { ok: false, data: null, error: 'command 必填' };
   const cwd = opts.cwd && isPathSafe(opts.cwd, ctx.cwd) ? path.resolve(ctx.cwd, opts.cwd) : ctx.cwd;
   try {
-    const result = await runShell(opts.command, [], cwd, opts.timeoutMs ?? 5000);
+    // 用 sh -c 执行命令字符串，沙箱隔离环境变量
+    const result = await runInSandbox('sh', ['-c', opts.command], {
+      cwd,
+      timeoutMs: opts.timeoutMs ?? 5000,
+    });
     return {
       ok: result.exitCode === 0,
       data: {
         exitCode: result.exitCode,
         stdout: result.stdout,
         stderr: result.stderr,
+        killed: result.killed,
       },
     };
   } catch (e) {
@@ -131,43 +135,6 @@ const httpRequest: ToolHandler = async (input) => {
     return { ok: false, data: null, error: (e as Error).message };
   }
 };
-
-function isPathSafe(target: string, base: string): boolean {
-  const resolved = path.resolve(base, target);
-  const rel = path.relative(base, resolved);
-  return !rel.startsWith('..') && !path.isAbsolute(rel);
-}
-
-function runShell(
-  command: string,
-  args: string[],
-  cwd: string,
-  timeoutMs = 5000,
-): Promise<{ exitCode: number; stdout: string; stderr: string }> {
-  return new Promise((resolve) => {
-    const child = spawn(command, args, {
-      cwd,
-      env: { PATH: process.env.PATH ?? '', HOME: process.env.HOME ?? '' },
-      stdio: ['ignore', 'pipe', 'pipe'],
-    });
-    let stdout = '';
-    let stderr = '';
-    child.stdout.on('data', (d) => (stdout += d.toString()));
-    child.stderr.on('data', (d) => (stderr += d.toString()));
-    const timer = setTimeout(() => {
-      child.kill('SIGKILL');
-      resolve({ exitCode: -1, stdout, stderr: `timeout after ${timeoutMs}ms\n${stderr}` });
-    }, timeoutMs);
-    child.on('close', (code) => {
-      clearTimeout(timer);
-      resolve({ exitCode: code ?? 0, stdout, stderr });
-    });
-    child.on('error', (err) => {
-      clearTimeout(timer);
-      resolve({ exitCode: -1, stdout, stderr: err.message });
-    });
-  });
-}
 
 // 注册内置工具
 export function registerBuiltinTools() {

@@ -3,7 +3,31 @@
 // M1 范围：users / agent_projects / agent_runs / agent_run_steps
 // M2+ 扩展：harness_config / skill / mcp_connection / rag_document / rag_chunk / orchestration
 
-import { pgTable, uuid, text, timestamp, integer, jsonb, varchar, pgEnum, boolean } from 'drizzle-orm/pg-core';
+import {
+  pgTable,
+  uuid,
+  text,
+  timestamp,
+  integer,
+  jsonb,
+  varchar,
+  pgEnum,
+  boolean,
+  customType,
+} from 'drizzle-orm/pg-core';
+
+// ===== pgvector 类型适配 =====
+// drizzle-orm 0.36 未直接导出 vector 列工厂，用 customType 自定义
+// 维度固定 1536（OpenAI text-embedding-3-small 输出维度）
+// pgvector 字面值格式：'[1,2,3,...]'；customType 的 toDriver 负责 JS array → 字符串
+export const vector1536 = customType<{ data: number[]; defaultData: never }>({
+  dataType() {
+    return 'vector(1536)';
+  },
+  toDriver(value: number[]): string {
+    return `[${value.join(',')}]`;
+  },
+});
 
 // ===== 用户 =====
 export const users = pgTable('users', {
@@ -107,6 +131,45 @@ export const skills = pgTable('skills', {
   updatedAt: timestamp('updated_at', { withTimezone: true }).defaultNow().notNull(),
 });
 
+// ===== RAG 文档（M3） =====
+// 一个 Agent 项目可上传多个文档；content_hash 用于去重
+export const ragDocuments = pgTable('rag_documents', {
+  id: uuid('id').defaultRandom().primaryKey(),
+  agentId: uuid('agent_id')
+    .notNull()
+    .references(() => agentProjects.id, { onDelete: 'cascade' }),
+  fileName: varchar('file_name', { length: 500 }).notNull(),
+  fileType: varchar('file_type', { length: 50 }).notNull(),
+  contentHash: varchar('content_hash', { length: 64 }).notNull(),
+  chunkCount: integer('chunk_count').notNull().default(0),
+  createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
+});
+
+// ===== RAG 文档分块（M3） =====
+// embedding: pgvector vector(1536)；metadata_json: { filePath, type, heading, lineStart, lineEnd }
+export const ragChunks = pgTable('rag_chunks', {
+  id: uuid('id').defaultRandom().primaryKey(),
+  documentId: uuid('document_id')
+    .notNull()
+    .references(() => ragDocuments.id, { onDelete: 'cascade' }),
+  agentId: uuid('agent_id')
+    .notNull()
+    .references(() => agentProjects.id, { onDelete: 'cascade' }),
+  content: text('content').notNull(),
+  embedding: vector1536('embedding'),
+  metadataJson: jsonb('metadata_json').$type<RagChunkMetadata>().default({}),
+  chunkIndex: integer('chunk_index').notNull().default(0),
+  createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
+});
+
+export interface RagChunkMetadata {
+  filePath?: string;
+  type?: 'markdown' | 'code' | 'text';
+  heading?: string;
+  lineStart?: number;
+  lineEnd?: number;
+}
+
 // 类型导出（供路由层与服务层使用）
 export type User = typeof users.$inferSelect;
 export type NewUser = typeof users.$inferInsert;
@@ -120,3 +183,7 @@ export type HarnessConfig = typeof harnessConfigs.$inferSelect;
 export type NewHarnessConfig = typeof harnessConfigs.$inferInsert;
 export type Skill = typeof skills.$inferSelect;
 export type NewSkill = typeof skills.$inferInsert;
+export type RagDocument = typeof ragDocuments.$inferSelect;
+export type NewRagDocument = typeof ragDocuments.$inferInsert;
+export type RagChunk = typeof ragChunks.$inferSelect;
+export type NewRagChunk = typeof ragChunks.$inferInsert;

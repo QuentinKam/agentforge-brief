@@ -10,19 +10,47 @@ import { zodHook } from '../lib/zod-hook';
 import { authMiddleware } from '../middleware/auth';
 import { getProviderFactory } from '../llm';
 import type { ProviderFactory } from '../llm/provider';
+import { retrieve, type RetrieveResult } from '../rag/service';
 import type { AppEnv } from '../types';
 
 const runSchema = z.object({
   agentId: z.string().uuid(),
   input: z.string().min(1).max(10000),
+  // 可选 RAG 注入配置；不传则使用默认值
+  ragOptions: z
+    .object({
+      enabled: z.boolean().optional(),
+      topK: z.number().int().min(1).max(20).optional(),
+    })
+    .optional(),
 });
+
+/** 把 RAG 检索结果格式化为系统消息片段 */
+function formatRagContext(results: RetrieveResult[]): string {
+  if (results.length === 0) return '';
+  const lines = results.map((r, i) => {
+    const meta = r.chunk.metadata;
+    const source = meta.filePath ?? r.document.fileName;
+    const heading = meta.heading ? ` › ${meta.heading}` : '';
+    const lineRange =
+      meta.lineStart && meta.lineEnd ? ` (L${meta.lineStart}-${meta.lineEnd})` : '';
+    return `### [${i + 1}] ${source}${heading}${lineRange}\n\n${r.chunk.content}`;
+  });
+  return [
+    '# 知识库检索结果（按相似度排序）',
+    '',
+    '以下片段从你专属的知识库中检索得到，可用于回答用户问题：',
+    '',
+    lines.join('\n\n'),
+  ].join('\n');
+}
 
 export function createAgentRunRoutes(factory: ProviderFactory = getProviderFactory()) {
   return new Hono<AppEnv>()
     .use('*', authMiddleware)
     .post('/', zValidator('json', runSchema, zodHook), async (ctx) => {
       const user = ctx.get('user');
-      const { agentId, input } = ctx.req.valid('json');
+      const { agentId, input, ragOptions } = ctx.req.valid('json');
 
       // 校验 Agent 归属
       const [project] = await db
@@ -61,9 +89,57 @@ export function createAgentRunRoutes(factory: ProviderFactory = getProviderFacto
 
       const start = Date.now();
       try {
+        // RAG 检索：默认启用（除非显式 enabled: false）
+        const ragEnabled = ragOptions?.enabled !== false;
+        const ragTopK = ragOptions?.topK ?? 5;
+        let ragResults: RetrieveResult[] = [];
+        let ragStepId: string | undefined;
+        if (ragEnabled) {
+          const ragStart = Date.now();
+          try {
+            ragResults = await retrieve(agentId, input, { topK: ragTopK });
+          } catch {
+            // 检索失败不阻塞主流程；落空 ragResults
+            ragResults = [];
+          }
+          const ragDurationMs = Date.now() - ragStart;
+          // 落 RAG 检索 step trace
+          const [ragStep] = await db
+            .insert(schema.agentRunSteps)
+            .values({
+              runId: run.id,
+              stepType: 'rag_retrieval',
+              stepInput: { query: input, topK: ragTopK },
+              stepOutput: {
+                hits: ragResults.length,
+                results: ragResults.map((r) => ({
+                  chunkId: r.chunk.id,
+                  documentId: r.document.id,
+                  fileName: r.document.fileName,
+                  score: r.score,
+                  contentPreview: r.chunk.content.slice(0, 200),
+                })),
+              },
+              durationMs: ragDurationMs,
+            })
+            .returning({ id: schema.agentRunSteps.id });
+          ragStepId = ragStep?.id;
+        }
+
+        // 组装 LLM 上下文：系统消息（含 RAG 注入）+ 用户输入
+        const messages: Array<{
+          role: 'system' | 'user' | 'assistant';
+          content: string;
+        }> = [];
+        const ragContext = formatRagContext(ragResults);
+        if (ragContext) {
+          messages.push({ role: 'system', content: ragContext });
+        }
+        messages.push({ role: 'user', content: input });
+
         const provider = factory.get(project.provider);
         const result = await provider.chat({
-          messages: [{ role: 'user', content: input }],
+          messages,
           model: project.model,
         });
 
@@ -83,7 +159,11 @@ export function createAgentRunRoutes(factory: ProviderFactory = getProviderFacto
         await db.insert(schema.agentRunSteps).values({
           runId: run.id,
           stepType: 'llm_call',
-          stepInput: { messages: [{ role: 'user', content: input }], model: project.model },
+          stepInput: {
+            messages: messages.map((m) => ({ role: m.role, content: m.content })),
+            model: project.model,
+            ragStepId,
+          },
           stepOutput: { content: result.content, tokens: result.tokens },
           durationMs: result.durationMs,
         });
