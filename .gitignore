@@ -41,3 +41,5 @@ client/node_modules
 
 # 本地运行时数据
 *.local
+
+.workbuddy-ai/

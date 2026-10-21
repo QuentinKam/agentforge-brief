@@ -1,5 +1,7 @@
 # AgentForge — AI Coding Agent 开发平台
 
+[![License: AGPL v3](https://img.shields.io/badge/License-AGPL_v3-blue.svg)](https://www.gnu.org/licenses/agpl-3.0)
+
 > 面向开发者的 AI Coding Agent 构建平台：Agent Runtime（沙箱执行）、Skill 系统、
 > MCP 工具集成、RAG 知识库、多 Agent 编排、Harness Builder（上下文/规则/约束可视化编排）。
 > 这是求职作品集项目，代码质量、架构决策记录和 README 完整度与功能同等重要。
@@ -233,3 +235,14 @@ bash start.command
 ## 路线图
 
 M4-M5 见 [PRD.md](PRD.md) 第 5 节。每个里程碑一个 git branch，完成后合回 main 并打 tag。
+
+## 许可证
+
+本项目以 **GNU Affero General Public License v3.0**（SPDX：`AGPL-3.0-only`）发布，许可证全文见 [LICENSE](LICENSE)。
+
+Copyright (C) 2026 QuentinKam
+
+- 可自由使用、修改、分发，但衍生作品必须以同等许可证开源
+- **第 13 条（网络服务条款）**：若将本项目（含修改版）作为网络服务对外提供，必须向使用者提供完整对应的源码
+- 如需闭源商用，须另行取得版权持有人的商业授权
+
